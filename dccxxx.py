@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from http import HTTPStatus
 import threading
 import psutil  # 添加psutil用于获取系统信息
+from security_utils import SecurityUtils
 
 # 配置日志系统
 logging.basicConfig(
@@ -337,29 +338,7 @@ def get_username_from_session(session_id):
     return session_data["username"]
 
 
-def validate_csrf_token(self, session_id):
-    """验证CSRF令牌"""
-    # 获取CSRF令牌（从请求头或表单数据）
-    csrf_token = self.headers.get('X-CSRF-Token')
-    if not csrf_token:
-        # 尝试从表单数据中获取
-        try:
-            content_length = int(self.headers.get('Content-Length', 0))
-            post_data = self.rfile.read(content_length).decode('utf-8')
-            data = json.loads(post_data)
-            csrf_token = data.get('csrf_token')
-        except:
-            pass
-    
-    # 检查CSRF令牌是否存在且有效
-    if not csrf_token or session_id not in USER_SESSIONS:
-        return False
-    
-    session_data = USER_SESSIONS[session_id]
-    if csrf_token != session_data.get("csrf_token"):
-        return False
-    
-    return True
+
 
 
 def clean_expired_sessions():
@@ -543,6 +522,30 @@ class StableUnicodeHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     MUSIC_DIR = os.path.join("D:\\", "code", "audio")  # 更新音乐目录路径
     BINARY_EXTENSIONS = ('.exe', '.zip', '.7z', '.rar', '.bin', '.msi',
                          '.iso', '.tar', '.gz', '.bz2', '.pkg', '.dmg')
+                          
+    def validate_csrf_token(self, session_id):
+        """验证CSRF令牌"""
+        # 获取CSRF令牌（从请求头或表单数据）
+        csrf_token = self.headers.get('X-CSRF-Token')
+        if not csrf_token:
+            # 尝试从表单数据中获取
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                post_data = self.rfile.read(content_length).decode('utf-8')
+                data = json.loads(post_data)
+                csrf_token = data.get('csrf_token')
+            except:
+                pass
+        
+        # 检查CSRF令牌是否存在且有效
+        if not csrf_token or session_id not in USER_SESSIONS:
+            return False
+        
+        session_data = USER_SESSIONS[session_id]
+        if csrf_token != session_data.get("csrf_token"):
+            return False
+        
+        return True
 
     def setup(self):
         """设置连接超时"""
@@ -581,7 +584,7 @@ class StableUnicodeHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
         """处理POST请求, 包括聊天消息, 私信和用户名注册"""
         # 不需要CSRF验证的特殊接口
-        no_csrf_needed = ['/api/login', '/api/register-username', '/api/check-username']
+        no_csrf_needed = ['/api/login', '/api/register-username', '/api/check-username', '/api/submit-feedback', '/api/logout', '/api/chat', '/api/private-chat']
         
         # 如果不是不需要CSRF验证的接口，则进行验证
         if self.path not in no_csrf_needed:
@@ -627,7 +630,7 @@ class StableUnicodeHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(HTTPStatus.BAD_REQUEST, "无效的请求数据")
                 return
                 
-            username = data['username'].strip()
+            username = SecurityUtils.sanitize_input(data['username'].strip())
             available, message = is_username_available(username)
             
             self.send_response(HTTPStatus.OK)
@@ -656,7 +659,7 @@ class StableUnicodeHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(HTTPStatus.BAD_REQUEST, "无效的请求数据，必须包含用户名和密码")
                 return
             
-            username = data['username'].strip()
+            username = SecurityUtils.sanitize_input(data['username'].strip())
             password = data['password']
             
             # 调用注册函数，传入用户名和密码
@@ -666,6 +669,8 @@ class StableUnicodeHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                 # 注册成功，创建会话
                 session_id, csrf_token = create_session(username)
                 
+                # 设置Cookie过期时间为24小时后
+                expires = (datetime.now() + timedelta(days=1)).strftime('%a, %d %b %Y %H:%M:%S GMT')
                 # 设置会话Cookie和CSRF Cookie
                 self.send_response(HTTPStatus.OK)
                 self.send_header('Content-type', 'application/json')
@@ -719,10 +724,10 @@ class StableUnicodeHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(HTTPStatus.BAD_REQUEST, "无效的请求数据")
                 return
 
-            name = data['name'].strip()
-            phone = data['phone'].strip()
-            email = data['email'].strip()
-            content = data['content'].strip()
+            name = SecurityUtils.sanitize_input(data['name'].strip())
+            phone = SecurityUtils.sanitize_input(data['phone'].strip())
+            email = SecurityUtils.sanitize_input(data['email'].strip())
+            content = SecurityUtils.sanitize_input(data['content'].strip())
 
             # 验证邮箱格式
             import re
@@ -803,6 +808,11 @@ class StableUnicodeHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                 # 登录成功，创建会话
                 session_id, csrf_token = create_session(username)
                 
+                # 设置Cookie过期时间为24小时后
+                expires = (datetime.now() + timedelta(days=1)).strftime(
+                    "%a, %d %b %Y %H:%M:%S GMT"
+                )
+                
                 # 更新在线用户
                 online_users[client_ip] = username
                 used_usernames.add(username)
@@ -812,12 +822,6 @@ class StableUnicodeHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header('Content-type', 'application/json')
                 self.send_header('Set-Cookie', f'session_id={session_id}; Path=/; Expires={expires}; HttpOnly; Secure; SameSite=Strict')
                 self.send_header('Set-Cookie', f'csrf_token={csrf_token}; Path=/; Expires={expires}; HttpOnly; Secure; SameSite=Strict')
-                self.send_header('Content-type', 'application/json')
-                # 设置为24小时后过期
-                expires = (datetime.now() + timedelta(days=1)).strftime(
-                    "%a, %d %b %Y %H:%M:%S GMT"
-                )
-                self.send_header('Set-Cookie', f'session_id={session_id}; Path=/; Expires={expires}; HttpOnly; Secure; SameSite=Strict')
                 self.end_headers()
                 self.wfile.write(json.dumps({
                     'success': True,
@@ -937,7 +941,7 @@ class StableUnicodeHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(HTTPStatus.BAD_REQUEST, "无效的请求数据")
                 return
                 
-            message = data['message'].strip()[:500]   # 限制消息长度
+            message = SecurityUtils.sanitize_input(data['message'].strip())[:500]   # 限制消息长度
             
             if not message:
                 self.send_error(HTTPStatus.BAD_REQUEST, "消息不能为空")
@@ -992,8 +996,8 @@ class StableUnicodeHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(HTTPStatus.BAD_REQUEST, "无效的请求数据")
                 return
                 
-            message = data['message'].strip()[:500]   # 限制消息长度
-            recipient = data['recipient'].strip()
+            message = SecurityUtils.sanitize_input(data['message'].strip())[:500]   # 限制消息长度
+            recipient = SecurityUtils.sanitize_input(data['recipient'].strip())
             
             if not message:
                 self.send_error(HTTPStatus.BAD_REQUEST, "消息不能为空")
